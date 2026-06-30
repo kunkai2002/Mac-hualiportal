@@ -1,0 +1,51 @@
+name: Build macOS
+
+# 在雲端 macOS 機器上編譯 Mac 版（Windows 本機無法產生 .dmg/.app）。
+# 觸發方式：手動（Actions 頁面點 Run workflow）或推送 v* 標籤。
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust (universal targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install deps
+        run: npm install
+
+      - name: Generate icons (含 .icns)
+        run: npx tauri icon app-icon.png
+
+      - name: Build (universal .app + .dmg)
+        run: npx tauri build --target universal-apple-darwin --bundles app,dmg
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: HualiPortal-macOS
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+          if-no-files-found: error
