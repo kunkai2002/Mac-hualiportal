@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "預設能力：主視窗加載遠端門戶網址",
-  "windows": ["main"],
+  "windows": ["main", "app*"],
   "remote": { "urls": ["https://huali-structure-app.qiaoyuhua2002.workers.dev"] },
-  "permissions": ["core:default", "autostart:allow-enable", "autostart:allow-disable", "autostart:allow-is-enabled", "opener:default", "opener:allow-open-url"]
+  "permissions": ["core:default", "autostart:allow-enable", "autostart:allow-disable", "autostart:allow-is-enabled", "opener:default", "opener:allow-open-url", "updater:default"]
 }

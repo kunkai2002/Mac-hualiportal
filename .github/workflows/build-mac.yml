@@ -1,14 +1,19 @@
 name: Build Desktop
 
-# 在雲端編譯桌面版（Windows + macOS）。
-# 觸發：手動（Actions 點 Run workflow，只出 artifact）或推送 v* 標籤（出 artifact + 由 publish 任務統一發布 Release，附上兩個固定檔名安裝包）。
+# 雲端編譯桌面版（Windows + macOS）+ 自動更新產物。
+# 觸發：手動（Actions → Run workflow，只出 artifact）或推送 v* 標籤（出 artifact + publish 發布 Release）。
+# 自動更新：build 步驟用簽名私鑰（GitHub Secrets）對更新包簽名，publish 組裝 latest.json 一併上傳。
+#   需要的 Secrets（在 repo Settings → Secrets and variables → Actions 設置）：
+#     TAURI_SIGNING_PRIVATE_KEY            ← 你本機 `npm run tauri signer generate` 生成的私鑰文件「全文」
+#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD   ← 生成時設的密碼（沒設就留空字符串）
+#   並把對應「公鑰」貼進 src-tauri/tauri.conf.json 的 plugins.updater.pubkey（替換 PASTE_YOUR_TAURI_PUBKEY_HERE）。
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write   # 讓內建 GITHUB_TOKEN 能建立 Release（無需 PAT）
+  contents: write   # 內建 GITHUB_TOKEN 建 Release（無需 PAT）
 
 jobs:
   build-mac:
@@ -35,15 +40,26 @@ jobs:
         run: npm install
       - name: Generate icons (含 .icns)
         run: npx tauri icon app-icon.png
-      - name: Build (universal .app + .dmg)
+      - name: Build (universal .app + .dmg + 更新包)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --target universal-apple-darwin --bundles app,dmg
-      - name: Rename dmg → 固定檔名
-        run: cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg HualiPortal-universal.dmg
+      - name: Collect mac 產物（dmg 安裝包 + 更新包 tar.gz + 簽名）
+        run: |
+          base=src-tauri/target/universal-apple-darwin/release/bundle
+          cp "$base"/dmg/*.dmg HualiPortal-universal.dmg
+          cp "$base"/macos/*.app.tar.gz HualiPortal.app.tar.gz
+          cp "$base"/macos/*.app.tar.gz.sig HualiPortal.app.tar.gz.sig
+          ls -la HualiPortal*
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: HualiPortal-macOS
-          path: HualiPortal-universal.dmg
+          path: |
+            HualiPortal-universal.dmg
+            HualiPortal.app.tar.gz
+            HualiPortal.app.tar.gz.sig
           if-no-files-found: error
 
   build-win:
@@ -68,18 +84,27 @@ jobs:
         run: npm install
       - name: Generate icons (含 .ico)
         run: npx tauri icon app-icon.png
-      - name: Build (NSIS .exe)
+      - name: Build (NSIS .exe + 更新簽名)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --bundles nsis
-      - name: Rename exe → 固定檔名
-        run: Copy-Item (Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName HualiPortal-setup.exe
+      - name: Collect win 產物（setup.exe + 簽名）
+        run: |
+          $nsis = "src-tauri/target/release/bundle/nsis"
+          Copy-Item (Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1).FullName HualiPortal-setup.exe
+          Copy-Item (Get-ChildItem "$nsis/*-setup.exe.sig" | Select-Object -First 1).FullName HualiPortal-setup.exe.sig
+          Get-ChildItem HualiPortal*
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: HualiPortal-Windows
-          path: HualiPortal-setup.exe
+          path: |
+            HualiPortal-setup.exe
+            HualiPortal-setup.exe.sig
           if-no-files-found: error
 
-  # 兩個構建都完成後，由單一任務發布 Release（避免兩個任務同時建 Release 衝突）
+  # 兩個構建都完成後，單一任務發布 Release（避免兩個任務同時建 Release / 改 latest.json 衝突）
   publish:
     needs: [build-mac, build-win]
     if: startsWith(github.ref, 'refs/tags/')
@@ -91,12 +116,33 @@ jobs:
           path: dist
       - name: List
         run: ls -R dist
-      - name: Publish Release (dmg + exe)
+      - name: 組裝 latest.json（自動更新清單）
+        run: |
+          WIN_SIG=$(cat dist/HualiPortal-Windows/HualiPortal-setup.exe.sig)
+          MAC_SIG=$(cat dist/HualiPortal-macOS/HualiPortal.app.tar.gz.sig)
+          VERSION="${GITHUB_REF_NAME#v}"
+          PUB="https://github.com/kunkai2002/Mac-hualiportal/releases/latest/download"
+          cat > latest.json <<EOF
+          {
+            "version": "$VERSION",
+            "notes": "華利建機處 桌面版 $GITHUB_REF_NAME 更新",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "windows-x86_64": { "signature": "$WIN_SIG", "url": "$PUB/HualiPortal-setup.exe" },
+              "darwin-x86_64":  { "signature": "$MAC_SIG", "url": "$PUB/HualiPortal.app.tar.gz" },
+              "darwin-aarch64": { "signature": "$MAC_SIG", "url": "$PUB/HualiPortal.app.tar.gz" }
+            }
+          }
+          EOF
+          cat latest.json
+      - name: Publish Release（安裝包 + 更新包 + latest.json）
         uses: softprops/action-gh-release@v2
         with:
           name: 華利建機處 桌面版 ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           files: |
             dist/HualiPortal-macOS/HualiPortal-universal.dmg
+            dist/HualiPortal-macOS/HualiPortal.app.tar.gz
             dist/HualiPortal-Windows/HualiPortal-setup.exe
+            latest.json
           fail_on_unmatched_files: true
