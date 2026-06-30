@@ -1,7 +1,7 @@
-name: Build macOS
+name: Build Desktop
 
-# 在雲端 macOS 機器上編譯 Mac 版（Windows 本機無法產生 .dmg/.app）。
-# 觸發方式：手動（Actions 頁面點 Run workflow，只出 artifact）或推送 v* 標籤（出 artifact + 自動發布 Release 附上 .dmg）。
+# 在雲端編譯桌面版（Windows + macOS）。
+# 觸發：手動（Actions 點 Run workflow，只出 artifact）或推送 v* 標籤（出 artifact + 自動發布 Release，附上固定檔名的安裝包）。
 on:
   workflow_dispatch:
   push:
@@ -15,17 +15,14 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
       - name: Setup Rust (universal targets)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -34,31 +31,66 @@ jobs:
             ~/.cargo/git
             src-tauri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-
       - name: Install deps
         run: npm install
-
       - name: Generate icons (含 .icns)
         run: npx tauri icon app-icon.png
-
       - name: Build (universal .app + .dmg)
         run: npx tauri build --target universal-apple-darwin --bundles app,dmg
-
-      - name: Upload artifacts
+      - name: Rename dmg → 固定檔名
+        run: cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg HualiPortal-universal.dmg
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: HualiPortal-macOS
-          path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+          path: HualiPortal-universal.dmg
           if-no-files-found: error
-
-      # 推送 v* 標籤時：自動建立 / 更新 GitHub Release 並附上 .dmg（手動 dispatch 不發布，只留 artifact）
-      - name: Publish GitHub Release (.dmg)
+      - name: Publish Release (.dmg)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: 華利建機處 桌面版 ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          files: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          files: HualiPortal-universal.dmg
+          fail_on_unmatched_files: true
+
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+      - name: Install deps
+        run: npm install
+      - name: Generate icons (含 .ico)
+        run: npx tauri icon app-icon.png
+      - name: Build (NSIS .exe)
+        run: npx tauri build --bundles nsis
+      - name: Rename exe → 固定檔名
+        run: Copy-Item (Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName HualiPortal-setup.exe
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HualiPortal-Windows
+          path: HualiPortal-setup.exe
+          if-no-files-found: error
+      - name: Publish Release (.exe)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 華利建機處 桌面版 ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: HualiPortal-setup.exe
           fail_on_unmatched_files: true
