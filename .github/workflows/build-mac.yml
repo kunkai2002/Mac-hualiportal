@@ -40,15 +40,23 @@ jobs:
         run: npm install
       - name: Generate icons (含 .icns)
         run: npx tauri icon app-icon.png
-      - name: Build (universal .app + .dmg + 更新包)
+      - name: Build (universal .app + 更新包)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --target universal-apple-darwin --bundles app,dmg
-      - name: Collect mac 產物（dmg 安裝包 + 更新包 tar.gz + 簽名）
+        run: npx tauri build --target universal-apple-darwin --bundles app
+      # DMG 改用 hdiutil 手打：Tauri 的 bundle_dmg.sh 走 Finder/AppleScript 排版，
+      # 在 GitHub 無頭 runner（macos-latest 鏡像更新後）會失敗；hdiutil 無頭穩定。
+      - name: Package .dmg (hdiutil)
         run: |
           base=src-tauri/target/universal-apple-darwin/release/bundle
-          cp "$base"/dmg/*.dmg HualiPortal-universal.dmg
+          mkdir dmgroot
+          cp -R "$base"/macos/*.app dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "HualiPortal" -srcfolder dmgroot -ov -format UDZO HualiPortal-universal.dmg
+      - name: Collect mac 產物（更新包 tar.gz + 簽名）
+        run: |
+          base=src-tauri/target/universal-apple-darwin/release/bundle
           cp "$base"/macos/*.app.tar.gz HualiPortal.app.tar.gz
           cp "$base"/macos/*.app.tar.gz.sig HualiPortal.app.tar.gz.sig
           ls -la HualiPortal*
