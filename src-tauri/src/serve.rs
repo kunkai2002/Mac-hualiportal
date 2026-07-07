@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
@@ -14,7 +16,47 @@ use tiny_http::{Header, Method, Response, Server};
 
 const PORTAL_BASE: &str = "https://huali-structure-app.qiaoyuhua2002.workers.dev";
 // 橋能力清單：門戶頁 fetch /ping 看到 "win" 才啟用自繪頂欄（舊版桌面殼沒有→仍用系統標題欄，避免雙標題欄）。
-const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update"];
+//   "oauth" = 支持本地橋 loopback 授權（反寫 Google 表）；門戶頁見到才走橋授權，否則退回 GIS 彈窗。
+const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth"];
+
+// ───────── 反寫 Google 表的 OAuth（桌面 WebView2 攔 GIS 彈窗 → 走系統瀏覽器 loopback）─────────
+//   流程：門戶頁 POST /oauth/start → 橋開系統瀏覽器授權頁 → Google 重定向到
+//   http://127.0.0.1:3710/oauth2callback#access_token=... → 回調 HTML 用 JS 讀 fragment
+//   回 POST /oauth/store 存進橋 → 門戶頁輪詢 GET /oauth/token 取得 token。
+//   用 implicit（response_type=token）避免在 Rust 側做 token 交換（無需額外 HTTP client 依賴）。
+//   ⚠️ 前置：Google Cloud 該 OAuth 客戶端要把「http://127.0.0.1:3710/oauth2callback」加入授權重定向 URI。
+const OAUTH_CLIENT_ID: &str = "637230075865-lfeagh9nb7j3v5p9a1ppk6mpi252b157.apps.googleusercontent.com";
+const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/spreadsheets";
+const OAUTH_REDIRECT: &str = "http://127.0.0.1:3710/oauth2callback";
+// 存 (access_token, 到期毫秒時間戳)。Mutex::new 為 const fn，故可直接作 static。
+static OAUTH_TOKEN: Mutex<Option<(String, u128)>> = Mutex::new(None);
+
+// 授權完成後回調頁：伺服器讀不到 URL fragment，交由此頁 JS 讀取 #access_token 再回 POST。
+const OAUTH_CALLBACK_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8"><title>Google 授權</title></head>
+<body style="font-family:system-ui,sans-serif;text-align:center;padding:48px 24px;color:#333">
+<h2 id="m">正在完成授權…</h2>
+<script>(function(){
+  var p=new URLSearchParams(location.hash.replace(/^#/,''));
+  var tok=p.get('access_token'), exp=p.get('expires_in');
+  var m=document.getElementById('m');
+  if(!tok){m.textContent='授權失敗：未取得存取權杖，請關閉此頁後重試。';return;}
+  fetch('/oauth/store',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({access_token:tok,expires_in:Number(exp)||3600})})
+    .then(function(){m.textContent='✓ 授權成功，請返回「華利建機處」應用繼續，可關閉此頁。';})
+    .catch(function(){m.textContent='寫回本地失敗，請重試。';});
+})();</script></body></html>"#;
+
+fn now_ms() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+fn oauth_auth_url() -> String {
+    let scope = urlencoding::encode(OAUTH_SCOPE);
+    let redirect = urlencoding::encode(OAUTH_REDIRECT);
+    format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=token&scope={}&prompt=consent&include_granted_scopes=true",
+        OAUTH_CLIENT_ID, redirect, scope
+    )
+}
 
 fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap()
@@ -28,6 +70,21 @@ fn json_resp(v: Value) -> Resp {
         .with_header(header("Access-Control-Allow-Origin", "*"))
         .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
         .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
+}
+
+// 只允許門戶頁跨域讀取（token 端點限縮來源，避免其它網站 fetch 本機橋竊取剛簽發的 Sheets token）。
+fn json_resp_portal(v: Value) -> Resp {
+    Response::from_string(v.to_string())
+        .with_header(header("Content-Type", "application/json; charset=utf-8"))
+        .with_header(header("Access-Control-Allow-Origin", PORTAL_BASE))
+        .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+        .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
+}
+
+// 回調頁走 HTML（同源，供系統瀏覽器渲染）。
+fn html_resp(s: &str) -> Resp {
+    Response::from_string(s.to_string())
+        .with_header(header("Content-Type", "text/html; charset=utf-8"))
 }
 
 fn parse_query(q: &str) -> HashMap<String, String> {
@@ -245,6 +302,39 @@ pub fn start_bridge(app: AppHandle) {
                 // ── 自動更新 ──
                 "/win/update/check" => json_resp(update_check(&app)),
                 "/win/update/apply" => json_resp(update_apply(&app)),
+
+                // ── 反寫 Google 表：loopback 授權 ──
+                "/oauth/start" => {
+                    { let mut t = OAUTH_TOKEN.lock().unwrap(); *t = None; } // 清舊 token，強制本次重新授權
+                    let ok = app.opener().open_url(oauth_auth_url(), None::<&str>).is_ok();
+                    json_resp(json!({"ok": ok}))
+                }
+                // Google 帶著 #access_token=... 重定向到這；fragment 伺服器讀不到，交回調頁 JS 處理。
+                "/oauth2callback" => html_resp(OAUTH_CALLBACK_HTML),
+                // 回調頁把 token 回 POST 存進橋。
+                "/oauth/store" => {
+                    let v = body_json(&mut req);
+                    let tok = v.get("access_token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let exp_in = v.get("expires_in").and_then(|x| x.as_u64()).unwrap_or(3600);
+                    if tok.is_empty() {
+                        json_resp(json!({"ok": false, "msg": "no token"}))
+                    } else {
+                        let exp_at = now_ms() + (exp_in as u128) * 1000;
+                        { let mut t = OAUTH_TOKEN.lock().unwrap(); *t = Some((tok, exp_at)); }
+                        json_resp(json!({"ok": true}))
+                    }
+                }
+                // 門戶頁輪詢取 token（限縮來源，剩餘壽命 <60s 視為無效）。
+                "/oauth/token" => {
+                    let now = now_ms();
+                    let got = { OAUTH_TOKEN.lock().unwrap().clone() };
+                    match got {
+                        Some((tok, exp)) if exp > now + 60_000 => {
+                            json_resp_portal(json!({"ok": true, "access_token": tok, "expires_in": ((exp - now) / 1000) as u64}))
+                        }
+                        _ => json_resp_portal(json!({"ok": false})),
+                    }
+                }
 
                 // ── 本地文件能力（原有）──
                 "/drives" => json_resp(drives()),
