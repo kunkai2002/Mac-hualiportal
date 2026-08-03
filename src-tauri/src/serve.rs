@@ -17,7 +17,9 @@ use tiny_http::{Header, Method, Response, Server};
 const PORTAL_BASE: &str = "https://huali-structure-app.qiaoyuhua2002.workers.dev";
 // 橋能力清單：門戶頁 fetch /ping 看到 "win" 才啟用自繪頂欄（舊版桌面殼沒有→仍用系統標題欄，避免雙標題欄）。
 //   "oauth" = 支持本地橋 loopback 授權（反寫 Google 表）；門戶頁見到才走橋授權，否則退回 GIS 彈窗。
-const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth"];
+//   "notify" = 0.2.2 新增的系統通知能力（POST /notify）。網頁端靠這個字串判斷
+//              「這個殼發得出系統通知嗎」——舊殼沒有它，網頁就不會謊稱桌面版收得到。
+const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth", "notify"];
 
 // ───────── 反寫 Google 表的 OAuth（桌面 WebView2 攔 GIS 彈窗 → 走系統瀏覽器 loopback）─────────
 //   流程：門戶頁 POST /oauth/start → 橋開系統瀏覽器授權頁 → Google 重定向到
@@ -157,6 +159,19 @@ fn open_child(app: &AppHandle, route: &str) {
 
 /// 供托盤菜單調用：在新窗口打開預設應用。
 pub fn open_app_window(app: &AppHandle, route: &str) { open_child(app, route); }
+
+/// 彈一則系統通知（Windows 走 toast，macOS 走通知中心）。回傳有沒有送出去。
+/// ★ 不看視窗在不在前台 —— 前景／後景的判斷在網頁端（isBackgrounded），
+///   殼這一層只負責「叫得動系統通知」。兩邊職責分開，才不會兩處各判一次而互相打架。
+fn show_notification(app: &AppHandle, title: &str, body: &str) -> bool {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .is_ok()
+}
 
 // ───────── 自動更新（Rust 驅動：遠端頁拿不到 updater JS API，故由橋觸發）─────────
 
@@ -300,6 +315,24 @@ pub fn start_bridge(app: AppHandle) {
                 }
 
                 // ── 自動更新 ──
+                // ── 系統通知（0.2.2 新增）──
+                //   網頁端在「人不在前台」時 POST 過來 {title, body, id}。
+                //   ★ 為什麼要有這條：這個殼在此之前**完全沒有通知能力**，
+                //     而網頁誤把它當成 C# 殼、把通知 post 進 window.chrome.webview
+                //     （Tauri 底層也是 WebView2，所以那個物件存在，但沒有人在聽）
+                //     → 桌面版一則系統通知都收不到，且毫無跡象。
+                "/notify" => {
+                    let v = if *req.method() == Method::Post { body_json(&mut req) } else { json!({}) };
+                    let title = v.get("title").and_then(|x| x.as_str()).map(|s| s.to_string())
+                        .or_else(|| q.get("title").cloned())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "華利建機處".to_string());
+                    let body = v.get("body").and_then(|x| x.as_str()).map(|s| s.to_string())
+                        .or_else(|| q.get("body").cloned())
+                        .unwrap_or_default();
+                    json_resp(json!({"ok": show_notification(&app, &title, &body)}))
+                }
+
                 "/win/update/check" => json_resp(update_check(&app)),
                 "/win/update/apply" => json_resp(update_apply(&app)),
 

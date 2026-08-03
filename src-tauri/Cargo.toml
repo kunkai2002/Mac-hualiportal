@@ -1,6 +1,6 @@
 [package]
 name = "huali-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "華利建機處 門戶桌面殼"
 edition = "2021"
 rust-version = "1.77"
@@ -13,6 +13,10 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
+# 0.2.2 新增：系統通知。在此之前這個殼**完全沒有通知能力** ——
+# 而網頁那邊誤以為它是 C# 殼、把通知 post 進 window.chrome.webview（無人接收），
+# 於是桌面版一則系統通知都收不到。見 serve.rs 的 /notify。
+tauri-plugin-notification = "2"
 serde_json = "1"
 tiny_http = "0.12"
 urlencoding = "2"
