@@ -43,6 +43,22 @@ fn main() {
             // 啟動內嵌本地橋（127.0.0.1:3710）：本地文件能力 + 原生窗口控制 + 更新；遠端門戶頁 fetch 即可（拿不到 IPC）。
             serve::start_bridge(app.handle().clone());
 
+            // ── 🔴🔴 macOS 一定要有原生標題列（2026-09-17，jojo：「強行安裝會丟失頂欄」）──
+            //   `tauri.conf.json` 的 `decorations: false` 是**給 Windows 用的**：
+            //   那邊的頂欄由網頁自己畫（`DesktopTitleBar.tsx`）。
+            //   但那條判定是 `window.chrome.webview`（WebView2 專屬），
+            //   macOS 走 WKWebView **永遠不成立** ⇒ 原生標題列被關掉、網頁也不畫
+            //   ⇒ 整個視窗連紅綠燈都沒有，拖不動也關不掉。
+            //   `tauri.macos.conf.json` 已經把它覆寫成 true；這裡再保一層，
+            //   免得平台設定檔沒被合併（改名、改版）時又變回一片空白。
+            //   ★ 用 `if cfg!(...)` 而不是 `#[cfg(...)]`：後者在 Windows 上**整段不編譯**，
+            //     裡面打錯字要等雲端的 mac job 跑到才發現。這樣寫本機 `cargo check` 就管得到。
+            if cfg!(target_os = "macos") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_decorations(true);
+                }
+            }
+
             // 預設開啟「開機自啟」（用戶可在系統設定 / 托盤後續關閉）
             let _ = app.autolaunch().enable();
 

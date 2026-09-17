@@ -79,6 +79,28 @@ npm run build
   桌面 app **下次打開自動是新版**，**不用重新打包、不用重裝**。✅
 - **只有改「桌面殼本身」**（這個項目：視窗、加原生文件功能等）→ 才需重跑第五步 `npm run build` 出新安裝包發出去。
 
+## 🔴🔴 macOS 兩條（2026-09-17，v0.2.3 修，別改回去）
+
+**① 標題列是分平台的。** `tauri.conf.json` 的 `decorations: false` **只給 Windows**：
+那邊的頂欄由網頁自己畫（`source_v12/src/components/DesktopTitleBar.tsx`），
+而它的判定是 `window.chrome.webview`（**WebView2 專屬**）。
+macOS 走 WKWebView，那個物件永遠不存在 ⇒ 原生標題列被關掉、網頁也不畫
+⇒ **整個視窗連紅綠燈都沒有**（jojo：「強行安裝會丟失頂欄」）。
+⇒ `tauri.macos.conf.json` 把 `decorations` 覆寫成 `true`，
+`main.rs` 的 `setup` 裡再 `set_decorations(true)` 保一層（平台設定檔沒被合併時的兜底）。
+**要在 mac 上也用自繪頂欄的話**，得先讓網頁那邊認得出 mac 殼（殼的主視窗載入的是**遠端**頁，
+拿不到 Tauri 的 IPC，所以只能靠自訂 User-Agent 或網址參數），不要只把 `decorations` 關掉。
+
+**② universal 的 `.app` 必須自己補 ad-hoc 簽章。**
+Rust 連結器給單一架構的執行檔蓋的 ad-hoc 簽名，會在 `lipo` 合成 universal 時被洗掉，
+而這個專案沒有設定簽章身分 ⇒ 產物是**無簽章**的 ⇒ Apple Silicon 的 macOS 直接拒絕載入，
+畫面上是「**已損毀，無法打開**」——看起來像下載壞了，其實跟下載無關（v0.2.2 的 DMG 就是這樣）。
+⇒ CI（`.github/workflows/build-mac.yml`）在 `tauri build` 之後、打 DMG 之前
+`codesign --force --deep --sign -`，**而且更新包 `.tar.gz` 要在簽名之後重打再重新簽一次**
+（bundler 產的那份裡面是簽名前的 .app）。
+★ ad-hoc **不等於**公證：第一次打開仍然要在「系統設定 → 隱私權與安全性」按「仍要打開」。
+要免掉那一步得有 Apple Developer 帳號（$99/年）＋ notarytool 公證。
+
 ## 想改的地方（都在 `src-tauri/tauri.conf.json`）
 - 視窗標題：`app.windows[0].title`
 - 默認打開頁：`app.windows[0].url`（想一打開就進 PM2，把結尾改成 `…workers.dev/pm2`）

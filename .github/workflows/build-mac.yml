@@ -45,10 +45,51 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --target universal-apple-darwin --bundles app
+      # ══════════════════════════════════════════════════════════════════════
+      # 🔴🔴 2026-09-17（jojo：「桌面端 mac 版好像沒法安裝」）：**.app 完全沒有簽章**。
+      #
+      #   Rust 的連結器在 macOS 上會給每個架構的執行檔蓋一個 ad-hoc 簽名，
+      #   但 `--target universal-apple-darwin` 是用 `lipo` 把兩份合成一份 ——
+      #   **合成的過程會把簽名洗掉**，而這個專案沒有設定任何簽章身分
+      #   ⇒ 產出的 universal .app 是**無簽章**的。
+      #   Apple Silicon 上 macOS **拒絕載入無簽章的 arm64 執行檔**，
+      #   使用者看到的是「"HualiPortal" 已損毀，無法打開，您應該將其移到垃圾桶」
+      #   —— 那句話看起來像檔案下載壞了，其實跟下載無關。
+      #
+      #   ⇒ 自己補一個 ad-hoc 簽章。這**不是** Apple 公證：第一次打開仍然要到
+      #     「系統設定 → 隱私權與安全性」按「仍要打開」（下載彈窗裡的步驟已照改），
+      #     但至少打得開。要免掉那一步得有 Apple 開發者帳號（$99/年）＋公證。
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Ad-hoc 簽名（Apple Silicon 打不打得開就看這一步）
+        run: |
+          set -euo pipefail
+          base=src-tauri/target/universal-apple-darwin/release/bundle
+          app=$(ls -d "$base"/macos/*.app | head -1)
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          # 沒簽上就當場失敗 —— 不要再放一包裝不起來的東西上 Release（這次就是這樣過去的）
+          codesign -dv "$app" 2>&1 | tee /dev/stderr | grep -q 'Signature=adhoc'
+      # 🔴 更新包要**在簽名之後重打**：bundler 產的那一份 tar.gz 裡面是簽名前的 .app，
+      #    照舊上傳的話，自動更新下來的仍然是打不開的那一版。
+      - name: 重打更新包（tar.gz）並重新簽名
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          base=src-tauri/target/universal-apple-darwin/release/bundle
+          app=$(ls -d "$base"/macos/*.app | head -1)
+          name=$(basename "$app")
+          rm -f "$base"/macos/*.app.tar.gz "$base"/macos/*.app.tar.gz.sig
+          ( cd "$base/macos" && tar czf "$name.tar.gz" "$name" )
+          npx tauri signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$base/macos/$name.tar.gz"
+          test -f "$base/macos/$name.tar.gz.sig"
       # DMG 改用 hdiutil 手打：Tauri 的 bundle_dmg.sh 走 Finder/AppleScript 排版，
       # 在 GitHub 無頭 runner（macos-latest 鏡像更新後）會失敗；hdiutil 無頭穩定。
+      # ★ 一定要排在簽名之後 —— 不然 DMG 裡裝的還是沒簽章的那一份。
       - name: Package .dmg (hdiutil)
         run: |
+          set -euo pipefail
           base=src-tauri/target/universal-apple-darwin/release/bundle
           mkdir dmgroot
           cp -R "$base"/macos/*.app dmgroot/
@@ -56,6 +97,7 @@ jobs:
           hdiutil create -volname "HualiPortal" -srcfolder dmgroot -ov -format UDZO HualiPortal-universal.dmg
       - name: Collect mac 產物（更新包 tar.gz + 簽名）
         run: |
+          set -euo pipefail
           base=src-tauri/target/universal-apple-darwin/release/bundle
           cp "$base"/macos/*.app.tar.gz HualiPortal.app.tar.gz
           cp "$base"/macos/*.app.tar.gz.sig HualiPortal.app.tar.gz.sig
