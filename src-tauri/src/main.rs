@@ -6,7 +6,7 @@
 mod serve;
 mod widget;
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
@@ -74,8 +74,9 @@ fn main() {
             let m_fs = MenuItem::with_id(app, "app:/file-search-v2", "文件查找", true, None::<&str>)?;
             let m_cal = MenuItem::with_id(app, "app:/calendar", "行事曆", true, None::<&str>)?;
             let m_sheets = MenuItem::with_id(app, "app:/sheets", "文件中轉站", true, None::<&str>)?;
-            // 0.2.4 桌面行事曆小窗：打開／解鎖（鎖住時小窗整個穿透，萬一釘子點不到，從這裡解）
-            let m_widget = MenuItem::with_id(app, "widget:open", "桌面行事曆", true, None::<&str>)?;
+            // 0.2.4 桌面行事曆小窗：開關（打勾＝開著，再按一次就關）／解鎖（鎖住時小窗整個穿透，萬一釘子點不到，從這裡解）
+            let m_widget = CheckMenuItem::with_id(app, "widget:toggle", "桌面行事曆", true, false, None::<&str>)?;
+            widget::bind_tray_item(m_widget.clone());
             let m_unlock = MenuItem::with_id(app, "widget:unlock", "解鎖桌面行事曆", true, None::<&str>)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             // 在新視窗開啟（子窗口，獨立於主窗）
@@ -99,8 +100,8 @@ fn main() {
                         show_main(app);
                     } else if id == "quit" {
                         app.exit(0);
-                    } else if id == "widget:open" {
-                        widget::open(app);
+                    } else if id == "widget:toggle" {
+                        widget::toggle(app);
                     } else if id == "widget:unlock" {
                         widget::set_locked(app, false);
                     } else if let Some(route) = id.strip_prefix("nw:") {

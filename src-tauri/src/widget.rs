@@ -14,11 +14,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::menu::CheckMenuItem;
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 
 pub const LABEL: &str = "calwidget";
 
@@ -175,10 +176,30 @@ fn build(app: &AppHandle) {
     }
 }
 
+/// 系統匣「桌面行事曆」那一格（打勾＝開著）。小窗從別處開關（網頁的關閉鍵、本機橋、啟動恢復）也要跟著改勾。
+static TRAY_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
+
+pub fn bind_tray_item(item: CheckMenuItem<Wry>) {
+    let _ = TRAY_ITEM.set(item);
+}
+
+fn sync_tray(open: bool) {
+    if let Some(item) = TRAY_ITEM.get() { let _ = item.set_checked(open); }
+}
+
+/// 系統匣按「桌面行事曆」：開著就關、關著就開。
+/// 🔴 這是一定關得掉的出口：網頁沒載進來（斷網、門戶連不上、舊版畫面）時，小窗裡沒有關閉鍵，
+///    它又置頂、無邊框，只剩這裡能關（不然只能退出整個程式，下次開機還照「上次開著」再打開）。
+pub fn toggle(app: &AppHandle) {
+    let open_now = STATE.lock().unwrap().open && app.get_webview_window(LABEL).is_some();
+    if open_now { close(app); } else { open(app); }
+}
+
 /// 打開（已經開著就叫到前面來）。
 pub fn open(app: &AppHandle) {
     STATE.lock().unwrap().open = true;
     save_now(app);
+    sync_tray(true);
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = app2.get_webview_window(LABEL) {
@@ -198,6 +219,7 @@ pub fn close(app: &AppHandle) {
         s.ignoring = false;
     }
     save_now(app);
+    sync_tray(false);
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(w) = app2.get_webview_window(LABEL) { let _ = w.close(); }
@@ -301,6 +323,7 @@ pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
                 s.ignoring = false;
             }
             save_now(window.app_handle());
+            sync_tray(false);
         }
         _ => {}
     }
