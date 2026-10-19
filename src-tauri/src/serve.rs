@@ -19,7 +19,20 @@ const PORTAL_BASE: &str = "https://huali-structure-app.qiaoyuhua2002.workers.dev
 //   "oauth" = 支持本地橋 loopback 授權（反寫 Google 表）；門戶頁見到才走橋授權，否則退回 GIS 彈窗。
 //   "notify" = 0.2.2 新增的系統通知能力（POST /notify）。網頁端靠這個字串判斷
 //              「這個殼發得出系統通知嗎」——舊殼沒有它，網頁就不會謊稱桌面版收得到。
-const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth", "notify"];
+//   "widget" = 0.2.4 新增的桌面行事曆小窗（/widget/*，見 widget.rs）。門戶的行事曆設定見到它才開桌面小窗，
+//              否則退回瀏覽器小視窗。
+const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth", "notify", "widget"];
+
+/// 本機橋的埠。正式一律 3710（門戶寫死）；除錯版可以用 `HUALI_BRIDGE_PORT`（3700～3799）避開
+/// 同一台電腦上開著的正式版（它佔著 3710）。小窗的網址會帶 `bp=` 告訴網頁改連哪個埠。
+pub fn bridge_port() -> u16 {
+    if cfg!(debug_assertions) {
+        if let Some(p) = std::env::var("HUALI_BRIDGE_PORT").ok().and_then(|v| v.parse::<u16>().ok()) {
+            if (3700..3800).contains(&p) { return p; }
+        }
+    }
+    3710
+}
 
 // ───────── 反寫 Google 表的 OAuth（桌面 WebView2 攔 GIS 彈窗 → 走系統瀏覽器 loopback）─────────
 //   流程：門戶頁 POST /oauth/start → 橋開系統瀏覽器授權頁 → Google 重定向到
@@ -274,7 +287,7 @@ fn body_json(req: &mut tiny_http::Request) -> Value {
 
 pub fn start_bridge(app: AppHandle) {
     std::thread::spawn(move || {
-        let server = match Server::http("127.0.0.1:3710") { Ok(s) => s, Err(_) => return };
+        let server = match Server::http(format!("127.0.0.1:{}", bridge_port())) { Ok(s) => s, Err(_) => return };
         for mut req in server.incoming_requests() {
             if *req.method() == Method::Options { let _ = req.respond(json_resp(json!({"ok": true}))); continue; }
             let url = req.url().to_string();
@@ -331,6 +344,27 @@ pub fn start_bridge(app: AppHandle) {
                         .or_else(|| q.get("body").cloned())
                         .unwrap_or_default();
                     json_resp(json!({"ok": show_notification(&app, &title, &body)}))
+                }
+
+                // ── 桌面行事曆小窗（0.2.4，見 widget.rs）──
+                "/widget/open" => { crate::widget::open(&app); json_resp(json!({"ok": true})) }
+                "/widget/close" => { crate::widget::close(&app); json_resp(json!({"ok": true})) }
+                "/widget/state" => json_resp(crate::widget::state()),
+                "/widget/lock" => {
+                    let on = q.get("on").map(|s| s == "1" || s == "true").unwrap_or(false);
+                    crate::widget::set_locked(&app, on);
+                    json_resp(json!({"ok": true, "locked": on}))
+                }
+                "/widget/hotspot" => {
+                    let n = |k: &str| q.get(k).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                    crate::widget::set_hotspot(n("x"), n("y"), n("w"), n("h"));
+                    json_resp(json!({"ok": true}))
+                }
+                // 小窗裡點了一件事：先把主視窗叫到前面（要在主界面打開它，網頁那邊再用廣播叫主界面開）
+                "/widget/show-main" => {
+                    let app2 = app.clone();
+                    let _ = app.run_on_main_thread(move || crate::show_main(&app2));
+                    json_resp(json!({"ok": true}))
                 }
 
                 "/win/update/check" => json_resp(update_check(&app)),

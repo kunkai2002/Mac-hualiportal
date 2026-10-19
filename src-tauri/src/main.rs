@@ -4,15 +4,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod serve;
+mod widget;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
-const PORTAL_BASE: &str = "https://huali-structure-app.qiaoyuhua2002.workers.dev";
+pub(crate) const PORTAL_BASE: &str = "https://huali-structure-app.qiaoyuhua2002.workers.dev";
 
-fn show_main(app: &tauri::AppHandle) {
+pub(crate) fn show_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -60,7 +61,10 @@ fn main() {
             }
 
             // 預設開啟「開機自啟」（用戶可在系統設定 / 托盤後續關閉）
-            let _ = app.autolaunch().enable();
+            // 🔴 0.2.4：除錯版不登記——在開著正式版的電腦上跑測試版，會把開機自啟改指到測試版的路徑。
+            if !cfg!(debug_assertions) {
+                let _ = app.autolaunch().enable();
+            }
 
             // 系統托盤：左鍵打開、右鍵菜單（打開 / 退出）
             let show = MenuItem::with_id(app, "show", "打開 華利建機處", true, None::<&str>)?;
@@ -70,6 +74,9 @@ fn main() {
             let m_fs = MenuItem::with_id(app, "app:/file-search-v2", "文件查找", true, None::<&str>)?;
             let m_cal = MenuItem::with_id(app, "app:/calendar", "行事曆", true, None::<&str>)?;
             let m_sheets = MenuItem::with_id(app, "app:/sheets", "文件中轉站", true, None::<&str>)?;
+            // 0.2.4 桌面行事曆小窗：打開／解鎖（鎖住時小窗整個穿透，萬一釘子點不到，從這裡解）
+            let m_widget = MenuItem::with_id(app, "widget:open", "桌面行事曆", true, None::<&str>)?;
+            let m_unlock = MenuItem::with_id(app, "widget:unlock", "解鎖桌面行事曆", true, None::<&str>)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             // 在新視窗開啟（子窗口，獨立於主窗）
             let nw = Submenu::with_items(app, "在新視窗開啟", true, &[
@@ -79,7 +86,8 @@ fn main() {
                 &MenuItem::with_id(app, "nw:/sheets", "文件中轉站", true, None::<&str>)?,
             ])?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &sep1, &m_home, &m_pm, &m_fs, &m_cal, &m_sheets, &nw, &sep2, &quit])?;
+            let sep3 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&show, &sep1, &m_home, &m_pm, &m_fs, &m_cal, &m_sheets, &nw, &sep3, &m_widget, &m_unlock, &sep2, &quit])?;
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("華利建機處")
@@ -91,6 +99,10 @@ fn main() {
                         show_main(app);
                     } else if id == "quit" {
                         app.exit(0);
+                    } else if id == "widget:open" {
+                        widget::open(app);
+                    } else if id == "widget:unlock" {
+                        widget::set_locked(app, false);
                     } else if let Some(route) = id.strip_prefix("nw:") {
                         serve::open_app_window(app, route);
                     } else if let Some(route) = id.strip_prefix("app:") {
@@ -115,14 +127,23 @@ fn main() {
                     let _ = w.hide();
                 }
             }
+            // 桌面行事曆小窗：上次開著就照原樣打開（主視窗縮在托盤也照樣在桌面上）
+            widget::restore(app.handle());
             Ok(())
         })
         // 關閉窗口：主窗縮托盤後台（順帶隱藏所有子窗 → 主窗關，子窗全關）；子窗放行真正關閉。
+        //   0.2.4：桌面行事曆小窗**不跟著藏**——它本來就是要在主視窗不在的時候留在桌面上。
         .on_window_event(|window, event| {
+            if window.label() == widget::LABEL {
+                widget::on_event(window, event);
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     let app = window.app_handle();
-                    for (_, w) in app.webview_windows() { let _ = w.hide(); }
+                    for (label, w) in app.webview_windows() {
+                        if label != widget::LABEL { let _ = w.hide(); }
+                    }
                     api.prevent_close();
                 }
             }
