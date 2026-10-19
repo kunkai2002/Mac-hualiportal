@@ -156,7 +156,10 @@ fn build(app: &AppHandle) {
         .inner_size(DEFAULT_W, DEFAULT_H)
         .min_inner_size(240.0, 180.0)
         .decorations(false)
-        .always_on_top(true)
+        // 0.2.5（jojo 10-19：「層級太高了，我要的是只有桌面能看到，其他能在這個窗口上面的」）：
+        // 貼在桌面那一層 —— 其他視窗都蓋得過它，點它也不會浮上來。不能縮小（「顯示桌面」會想把它縮掉，見 on_event）。
+        .always_on_bottom(true)
+        .minimizable(false)
         .skip_taskbar(true)
         .shadow(false)
         .resizable(true)
@@ -309,6 +312,12 @@ fn start_poller(app: AppHandle) {
 pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     match event {
         tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+            // 被「顯示桌面」（Win+D）之類縮掉：馬上叫回來 —— 它本來就在最底層，回來也只在桌面上看得到。
+            // 縮小時位置是 (-32000,-32000)，不能記進設定檔。
+            if window.is_minimized().unwrap_or(false) {
+                let _ = window.unminimize();
+                return;
+            }
             if let (Ok(p), Ok(sz)) = (window.outer_position(), window.inner_size()) {
                 if sz.width > 0 && sz.height > 0 {
                     STATE.lock().unwrap().geo = Some(Geo { x: p.x, y: p.y, w: sz.width, h: sz.height });

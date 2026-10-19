@@ -21,8 +21,8 @@ pub(crate) fn show_main(app: &tauri::AppHandle) {
     }
 }
 
-// 托盤點某個預設應用 → 主視窗導航到該路由並顯示
-fn open_app(app: &tauri::AppHandle, route: &str) {
+// 托盤點某個預設應用 → 主視窗導航到該路由並顯示（0.2.5 起桌面行事曆小窗點一件事也走這裡，見 serve.rs `/widget/open-main`）
+pub(crate) fn open_app(app: &tauri::AppHandle, route: &str) {
     if let Some(w) = app.get_webview_window("main") {
         let url = format!("{}{}", PORTAL_BASE, route);
         let _ = w.eval(&format!("window.location.assign('{}')", url.replace('\'', "%27")));

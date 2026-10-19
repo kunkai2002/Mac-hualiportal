@@ -21,7 +21,8 @@ const PORTAL_BASE: &str = "https://huali-structure-app.qiaoyuhua2002.workers.dev
 //              「這個殼發得出系統通知嗎」——舊殼沒有它，網頁就不會謊稱桌面版收得到。
 //   "widget" = 0.2.4 新增的桌面行事曆小窗（/widget/*，見 widget.rs）。門戶的行事曆設定見到它才開桌面小窗，
 //              否則退回瀏覽器小視窗。
-const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth", "notify", "widget"];
+// "widget2"（0.2.5）：小窗貼在桌面那一層（其他視窗都能蓋在上面）＋ `/widget/open-main`。網頁靠它決定說明怎麼寫、點一件事沒人接時找誰。
+const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth", "notify", "widget", "widget2"];
 
 /// 本機橋的埠。正式一律 3710（門戶寫死）；除錯版可以用 `HUALI_BRIDGE_PORT`（3700～3799）避開
 /// 同一台電腦上開著的正式版（它佔著 3710）。小窗的網址會帶 `bp=` 告訴網頁改連哪個埠。
@@ -365,6 +366,19 @@ pub fn start_bridge(app: AppHandle) {
                     let app2 = app.clone();
                     let _ = app.run_on_main_thread(move || crate::show_main(&app2));
                     json_resp(json!({"ok": true}))
+                }
+                // 0.2.5：小窗點一件事 → 主視窗跳到那一天那一件。網頁先用 BroadcastChannel 問新主界面，沒人接才走這裡
+                // （以前沒人接就 window.open，而電腦版會擋掉另開視窗 ⇒ 點了沒反應）。
+                // 🔴 只收門戶站內路徑：「/」開頭、不是「//」、沒有反斜線／引號／控制字元 —— 不讓別的網頁借這支把主視窗帶去別的站。
+                "/widget/open-main" => {
+                    let path = q.get("path").cloned().unwrap_or_default();
+                    let ok = path.starts_with('/') && !path.starts_with("//")
+                        && !path.contains(['\\', '\'', '"']) && !path.chars().any(|c| c.is_control());
+                    if ok {
+                        let app2 = app.clone();
+                        let _ = app.run_on_main_thread(move || crate::open_app(&app2, &path));
+                    }
+                    json_resp(json!({"ok": ok}))
                 }
 
                 "/win/update/check" => json_resp(update_check(&app)),
