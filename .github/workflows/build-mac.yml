@@ -68,7 +68,11 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           # 沒簽上就當場失敗 —— 不要再放一包裝不起來的東西上 Release（這次就是這樣過去的）
-          codesign -dv "$app" 2>&1 | tee /dev/stderr | grep -q 'Signature=adhoc'
+          # 🔴 0.2.7：不准寫成 `| tee /dev/stderr | grep -q`——grep -q 一對到就關管子，tee 收到 Broken pipe，
+          #    pipefail 把它當失敗（簽名其實成功了）；誰先結束是碰運氣（0.2.6 過、0.2.7 第一次沒過）。先存起來再比。
+          info=$(codesign -dv "$app" 2>&1)
+          echo "$info"
+          echo "$info" | grep 'Signature=adhoc' > /dev/null
       # 🔴 更新包要**在簽名之後重打**：bundler 產的那一份 tar.gz 裡面是簽名前的 .app，
       #    照舊上傳的話，自動更新下來的仍然是打不開的那一版。
       - name: 重打更新包（tar.gz）並重新簽名
