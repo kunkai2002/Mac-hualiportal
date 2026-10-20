@@ -40,6 +40,17 @@ fn main() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        // ── 0.2.7：從外面拖檔案進門戶（jojo 10-20：出差報告「直接拖拽圖片或文件 … 微信直接拖過來的也要能識別到」）──
+        //   主視窗、子視窗改成 `dragDropEnabled: false`（tauri.conf.json／serve.rs），拖進來的檔案才交給網頁的 drop 事件；
+        //   以前殼整個攔下來，網頁一個事件都收不到。
+        //   🔴 代價：網頁沒接住的檔案，WebView 會直接「打開那個檔」⇒ 整個門戶被換成一張圖、回不去。
+        //      ⇒ 往 file:// 的導航一律擋掉（門戶從來不需要在視窗裡打開本機檔；開本機檔走本機橋 /open）。
+        //      這一層讓 0.2.7 在舊門戶上也安全；門戶 0.26.98 另外在網頁那一層也擋（fileDropGuard）。
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("drop-guard")
+                .on_navigation(|_webview, url| url.scheme() != "file")
+                .build(),
+        )
         .setup(|app| {
             // 啟動內嵌本地橋（127.0.0.1:3710）：本地文件能力 + 原生窗口控制 + 更新；遠端門戶頁 fetch 即可（拿不到 IPC）。
             serve::start_bridge(app.handle().clone());

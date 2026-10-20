@@ -22,7 +22,8 @@ const PORTAL_BASE: &str = "https://huali-structure-app.qiaoyuhua2002.workers.dev
 //   "widget" = 0.2.4 新增的桌面行事曆小窗（/widget/*，見 widget.rs）。門戶的行事曆設定見到它才開桌面小窗，
 //              否則退回瀏覽器小視窗。
 // "widget2"（0.2.5）：小窗貼在桌面那一層（其他視窗都能蓋在上面）＋ `/widget/open-main`。網頁靠它決定說明怎麼寫、點一件事沒人接時找誰。
-const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth", "notify", "widget", "widget2"];
+// "drop"（0.2.7）：從外面拖進來的檔案會交給網頁（主視窗、子視窗 dragDropEnabled: false）。門戶見不到它就在出差報告那裡提醒「電腦版要更新才拖得進來」。
+const BRIDGE_CAPS: &[&str] = &["file", "win", "badge", "child", "update", "oauth", "notify", "widget", "widget2", "drop"];
 
 /// 本機橋的埠。正式一律 3710（門戶寫死）；除錯版可以用 `HUALI_BRIDGE_PORT`（3700～3799）避開
 /// 同一台電腦上開著的正式版（它佔著 3710）。小窗的網址會帶 `bp=` 告訴網頁改連哪個埠。
@@ -166,6 +167,8 @@ fn open_child(app: &AppHandle, route: &str) {
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(900.0, 600.0)
                 .center()
+                // 0.2.7：拖進來的檔案交給網頁（同主視窗的 dragDropEnabled: false，見 main.rs 的 drop-guard）。
+                .disable_drag_drop_handler()
                 .build();
         });
     }
