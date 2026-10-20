@@ -41,13 +41,15 @@ struct State {
     /// 現在是不是在穿透（避免每 60ms 重設一次）。
     ignoring: bool,
     poller: bool,
+    /// 0.2.6：鎖住時桌面跑到最前面（Win+D）⇒ 暫時改成置頂浮上來；這一格記現在是不是浮著。
+    raised: bool,
     last_save: Option<Instant>,
     save_pending: bool,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     open: false, locked: false, geo: None, hot: None,
-    ignoring: false, poller: false, last_save: None, save_pending: false,
+    ignoring: false, poller: false, raised: false, last_save: None, save_pending: false,
 });
 
 /// 小窗要載哪個門戶。除錯版可以用 `HUALI_WIDGET_BASE` 指到鏡像站（正式站還沒有這一頁時測試用）。
@@ -220,6 +222,7 @@ pub fn close(app: &AppHandle) {
         s.open = false;
         s.locked = false;      // 關掉就不留鎖：下次打開先能動、能調
         s.ignoring = false;
+        s.raised = false;      // 下次打開是新建的視窗，本來就在最底層
     }
     save_now(app);
     sync_tray(false);
@@ -282,6 +285,52 @@ pub fn hot_contains(hot: (f64, f64, f64, f64), cursor: (f64, f64), win_origin: (
     lx >= x && lx <= x + w && ly >= y && ly <= y + h
 }
 
+// ───────── 鎖住時 Win+D 也不消失（0.2.6） ─────────
+// jojo 10-20：「我還想當我鎖定後哪怕 win+D 都不會消失」。
+// 「顯示桌面」不是把視窗縮小，是把**桌面本身**拉到所有視窗前面 —— 貼在最底層的小窗因此被蓋住。
+// ⇒ 鎖住時順便看前景是不是桌面；是就暫時改成置頂浮上來，切回任何別的視窗就沉回最底層。
+
+/// 前景是不是桌面本身：Win+D 之後是 `WorkerW`、點了桌面空白處是 `Progman`（Windows 10／11）。
+#[cfg(windows)]
+fn desktop_is_foreground() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetClassNameW(hwnd: isize, name: *mut u16, max: i32) -> i32;
+    }
+    if cfg!(debug_assertions) {
+        // 測試用：除錯版指一個檔，檔在就當成桌面在最前面（不用真的按 Win+D 打擾正在用電腦的人）
+        if let Ok(p) = std::env::var("HUALI_WIDGET_FAKE_DESKTOP") {
+            if !p.is_empty() { return std::path::Path::new(&p).exists(); }
+        }
+    }
+    let h = unsafe { GetForegroundWindow() };
+    if h == 0 { return false; }
+    let mut buf = [0u16; 32];
+    let n = unsafe { GetClassNameW(h, buf.as_mut_ptr(), buf.len() as i32) };
+    if n <= 0 { return false; }
+    let name = String::from_utf16_lossy(&buf[..n as usize]);
+    name == "WorkerW" || name == "Progman"
+}
+#[cfg(not(windows))]
+fn desktop_is_foreground() -> bool { false }
+
+/// 浮上來（置頂）／沉回最底層。狀態沒變就不動。
+fn set_raised(app: &AppHandle, up: bool) {
+    {
+        let mut s = STATE.lock().unwrap();
+        if s.raised == up { return; }
+        s.raised = up;
+    }
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window(LABEL) {
+            if up { let _ = w.set_always_on_bottom(false); let _ = w.set_always_on_top(true); }
+            else { let _ = w.set_always_on_top(false); let _ = w.set_always_on_bottom(true); }
+        }
+    });
+}
+
 fn start_poller(app: AppHandle) {
     {
         let mut s = STATE.lock().unwrap();
@@ -291,16 +340,27 @@ fn start_poller(app: AppHandle) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(POLL);
-            let (locked, hot) = { let s = STATE.lock().unwrap(); (s.locked, s.hot) };
+            let (locked, hot, raised) = { let s = STATE.lock().unwrap(); (s.locked, s.hot, s.raised) };
             let Some(w) = app.get_webview_window(LABEL) else { break };
-            if !locked { break; }
+            // 鎖住：桌面在最前面就浮上來。解鎖時還浮著：等前景離開桌面再沉下去（不在使用者眼前突然消失）。
+            let desk_fg = desktop_is_foreground();
+            if locked { set_raised(&app, desk_fg); }
+            else if raised && !desk_fg { set_raised(&app, false); }
+            if !locked {
+                if STATE.lock().unwrap().raised { continue; }
+                break;
+            }
             let over = match (hot, w.cursor_position(), w.inner_position(), w.scale_factor()) {
                 (Some(r), Ok(c), Ok(p), Ok(sf)) => hot_contains(r, (c.x, c.y), (p.x as f64, p.y as f64), sf),
                 _ => false,
             };
             apply_ignore(&app, !over, false);
         }
-        STATE.lock().unwrap().poller = false;
+        {
+            let mut s = STATE.lock().unwrap();
+            s.poller = false;
+            if app.get_webview_window(LABEL).is_none() { s.raised = false; }   // 視窗沒了：下次開是新建的（最底層）
+        }
         // 解鎖了（或視窗沒了）：一定回到「點得到」
         if !STATE.lock().unwrap().locked { apply_ignore(&app, false, true); }
     });
@@ -330,6 +390,7 @@ pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
                 let mut s = STATE.lock().unwrap();
                 s.open = false;
                 s.ignoring = false;
+                s.raised = false;
             }
             save_now(window.app_handle());
             sync_tray(false);
