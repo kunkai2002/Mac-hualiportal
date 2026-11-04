@@ -1,6 +1,6 @@
 [package]
 name = "huali-desktop"
-version = "0.2.7"
+version = "0.2.8"
 description = "華利建機處 門戶桌面殼"
 edition = "2021"
 rust-version = "1.77"
@@ -17,6 +17,9 @@ tauri-plugin-updater = "2"
 # 而網頁那邊誤以為它是 C# 殼、把通知 post 進 window.chrome.webview（無人接收），
 # 於是桌面版一則系統通知都收不到。見 serve.rs 的 /notify。
 tauri-plugin-notification = "2"
+# 0.2.8：只准開一個（jojo 11-04「沒法保證後臺只有一個應用，會出現打開多個桌面端」）。
+#   第二次打開（雙擊捷徑、開機自啟又手動開一次）＝叫醒已經在跑的那一個，自己馬上退出。
+tauri-plugin-single-instance = "2"
 serde_json = "1"
 tiny_http = "0.12"
 urlencoding = "2"

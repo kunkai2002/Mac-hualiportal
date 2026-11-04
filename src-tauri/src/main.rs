@@ -32,6 +32,16 @@ pub(crate) fn open_app(app: &tauri::AppHandle, route: &str) {
 
 fn main() {
     tauri::Builder::default()
+        // ── 0.2.8：只准開一個（jojo 11-04）──
+        //   以前雙擊捷徑、或開機自啟之後又手動開一次，就多一個殼：兩個托盤圖示、兩份通知，
+        //   第二個的本機橋搶不到 3710（被第一個佔著），網頁那邊連到哪一個是碰運氣。
+        //   🔴 一定要第一個註冊：外掛在第二個行程裡一偵測到就叫醒第一個、自己退出，後面的外掛、setup 都不該跑。
+        //   第二次是開機自啟帶 --minimized 進來的＝不打擾（照舊縮在托盤）；其餘一律把主視窗叫出來。
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|a| a == "--minimized") {
+                show_main(app);
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // 0.2.2：系統通知。網頁端透過本機橋 POST /notify 呼叫（見 serve.rs）。
