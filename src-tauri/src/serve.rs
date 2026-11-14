@@ -84,18 +84,66 @@ type Resp = Response<std::io::Cursor<Vec<u8>>>;
 fn json_resp(v: Value) -> Resp {
     Response::from_string(v.to_string())
         .with_header(header("Content-Type", "application/json; charset=utf-8"))
-        .with_header(header("Access-Control-Allow-Origin", "*"))
-        .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
-        .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
 }
 
-// 只允許門戶頁跨域讀取（token 端點限縮來源，避免其它網站 fetch 本機橋竊取剛簽發的 Sheets token）。
-fn json_resp_portal(v: Value) -> Resp {
-    Response::from_string(v.to_string())
-        .with_header(header("Content-Type", "application/json; charset=utf-8"))
-        .with_header(header("Access-Control-Allow-Origin", PORTAL_BASE))
-        .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
-        .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
+// ───────── 誰可以叫這支橋（0.2.9，體檢 11-13 第一節第 4 條）─────────
+//   以前每個回應都帶 `Access-Control-Allow-Origin: *` ＝任何網頁都能透過 127.0.0.1:3710 讀、寫、搬本機檔案、開程式。
+//   現在只認門戶自己的網址；規則跟 source_v12/local-agent/server.js 的 ORIGIN_RE 是同一條，改一邊要改另一邊：
+//     ^https://([a-z0-9-]+-)?huali-structure-(app|staging)\.qiaoyuhua2002\.workers\.dev$   正式站、測試站、版本預覽網址
+//     ^http://(localhost|127\.0\.0\.1)(:\d+)?$                                           本機開發；OAuth 回調頁（本橋自己的網址）
+//   ① 帶了 Origin 但不認得 ⇒ 403（別的網站用 fetch、表單送過來）。
+//   ② 沒有認得的 Origin 時只回 OPEN_READ_ROUTES 裡的只讀 GET；其餘（開程式、改檔案、動視窗、發通知、授權）⇒ 403
+//      （例：別的網頁用 <img src="http://127.0.0.1:3710/open?path=…"> 偷打，瀏覽器不送 Origin）。
+//   門戶自己全部用 fetch 叫這支，fetch 跨站一定帶 Origin，所以不受影響。
+
+/// 認得的 Origin（等同上面兩條正規式，不另外引入 regex 套件）。
+fn origin_ok(o: &str) -> bool {
+    if let Some(host) = o.strip_prefix("https://") {
+        let Some(sub) = host.strip_suffix(".qiaoyuhua2002.workers.dev") else { return false };
+        for name in ["huali-structure-app", "huali-structure-staging"] {
+            if sub == name { return true; }
+            // ([a-z0-9-]+-)? ＝ 前綴至少兩個字、最後一個是「-」、只含小寫英數與「-」
+            if let Some(pre) = sub.strip_suffix(name) {
+                if pre.len() >= 2 && pre.ends_with('-')
+                    && pre.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if let Some(rest) = o.strip_prefix("http://") {
+        let (host, port) = match rest.split_once(':') { Some((h, p)) => (h, Some(p)), None => (rest, None) };
+        if host != "localhost" && host != "127.0.0.1" { return false; }
+        return match port { None => true, Some(p) => !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) };
+    }
+    false
+}
+
+/// 沒帶 Origin 也照舊回應的只讀 GET。
+///   /read：門戶的檔案預覽是 <img>／<iframe> 直接載，瀏覽器不送 Origin；別的網站這樣載也讀不到內容。
+///   /oauth2callback：Google 授權完把系統瀏覽器導回這裡（直接開網址，不送 Origin）。
+const OPEN_READ_ROUTES: &[&str] = &["/ping", "/drives", "/ls", "/read", "/win/is-maximized", "/widget/state", "/oauth2callback"];
+
+fn forbidden() -> Resp {
+    Response::from_string("").with_status_code(403).with_header(header("Vary", "Origin"))
+}
+
+/// 回應加上跨站標頭：只對認得的 Origin 回寫它本身（不再是 *）。
+/// /oauth/token 更嚴：只給正式站（避免別的網頁讀走剛簽發的 Sheets token），跟 0.2.8 以前的 json_resp_portal 一樣。
+fn with_cors(resp: Resp, allow: Option<&str>, path: &str) -> Resp {
+    let allow = match allow {
+        Some(o) if path == "/oauth/token" && o != PORTAL_BASE => None,
+        a => a,
+    };
+    let resp = resp.with_header(header("Vary", "Origin"));
+    match allow {
+        Some(o) => resp
+            .with_header(header("Access-Control-Allow-Origin", o))
+            .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+            .with_header(header("Access-Control-Allow-Headers", "Content-Type")),
+        None => resp,
+    }
 }
 
 // 回調頁走 HTML（同源，供系統瀏覽器渲染）。
@@ -293,9 +341,23 @@ pub fn start_bridge(app: AppHandle) {
     std::thread::spawn(move || {
         let server = match Server::http(format!("127.0.0.1:{}", bridge_port())) { Ok(s) => s, Err(_) => return };
         for mut req in server.incoming_requests() {
-            if *req.method() == Method::Options { let _ = req.respond(json_resp(json!({"ok": true}))); continue; }
+            let origin = req.headers().iter()
+                .find(|h| h.field.equiv("Origin"))
+                .map(|h| h.value.as_str().to_string());
+            let allow = origin.as_deref().filter(|o| origin_ok(o)).map(|s| s.to_string());
+            // ① 帶了不認得的 Origin：一律不理（預檢 OPTIONS 也一樣）
+            if origin.is_some() && allow.is_none() { let _ = req.respond(forbidden()); continue; }
             let url = req.url().to_string();
             let (path, query) = url.split_once('?').map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or((url.clone(), String::new()));
+            if *req.method() == Method::Options {
+                let _ = req.respond(with_cors(json_resp(json!({"ok": true})), allow.as_deref(), &path));
+                continue;
+            }
+            // ② 沒有認得的 Origin：只准只讀的 GET
+            if allow.is_none() && !(*req.method() == Method::Get && OPEN_READ_ROUTES.contains(&path.as_str())) {
+                let _ = req.respond(forbidden());
+                continue;
+            }
             let q = parse_query(&query);
             let resp: Resp = match path.as_str() {
                 "/ping" => json_resp(json!({"ok": true, "bridge": "huali-portal-embedded", "version": env!("CARGO_PKG_VERSION"), "caps": BRIDGE_CAPS})),
@@ -414,9 +476,9 @@ pub fn start_bridge(app: AppHandle) {
                     let got = { OAUTH_TOKEN.lock().unwrap().clone() };
                     match got {
                         Some((tok, exp)) if exp > now + 60_000 => {
-                            json_resp_portal(json!({"ok": true, "access_token": tok, "expires_in": ((exp - now) / 1000) as u64}))
+                            json_resp(json!({"ok": true, "access_token": tok, "expires_in": ((exp - now) / 1000) as u64}))
                         }
-                        _ => json_resp_portal(json!({"ok": false})),
+                        _ => json_resp(json!({"ok": false})),
                     }
                 }
 
@@ -431,8 +493,7 @@ pub fn start_bridge(app: AppHandle) {
                 "/read" => match q.get("path") {
                     Some(p) if Path::new(p).exists() => match fs::read(p) {
                         Ok(bytes) => Response::from_data(bytes)
-                            .with_header(header("Content-Type", mime_of(p)))
-                            .with_header(header("Access-Control-Allow-Origin", "*")),
+                            .with_header(header("Content-Type", mime_of(p))),
                         Err(e) => json_resp(json!({"ok": false, "msg": e.to_string()})),
                     },
                     _ => json_resp(json!({"ok": false, "msg": "not found"})),
@@ -468,7 +529,42 @@ pub fn start_bridge(app: AppHandle) {
                 },
                 _ => json_resp(json!({"ok": false, "msg": "unknown"})),
             };
-            let _ = req.respond(resp);
+            let _ = req.respond(with_cors(resp, allow.as_deref(), &path));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::origin_ok;
+
+    #[test]
+    fn origin_rule_matches_local_agent() {
+        for o in [
+            "https://huali-structure-app.qiaoyuhua2002.workers.dev",
+            "https://huali-structure-staging.qiaoyuhua2002.workers.dev",
+            "https://1a2b3c4d-huali-structure-app.qiaoyuhua2002.workers.dev",
+            "https://pr-12-huali-structure-staging.qiaoyuhua2002.workers.dev",
+            "http://localhost",
+            "http://localhost:5173",
+            "http://127.0.0.1:3710",
+        ] { assert!(origin_ok(o), "{o}"); }
+        for o in [
+            "null",
+            "https://evil.example.com",
+            "http://huali-structure-app.qiaoyuhua2002.workers.dev",
+            "https://huali-structure-app.qiaoyuhua2002.workers.dev.evil.com",
+            "https://evilhuali-structure-app.qiaoyuhua2002.workers.dev",
+            "https://-huali-structure-app.qiaoyuhua2002.workers.dev",
+            "https://Ab-huali-structure-app.qiaoyuhua2002.workers.dev",
+            "https://x.y-huali-structure-app.qiaoyuhua2002.workers.dev",
+            "https://huali-structure-app.qiaoyuhua2002.workers.dev/",
+            "https://huali-structure-app.qiaoyuhua2002.workers.dev:443",
+            "http://localhost:",
+            "http://localhost:80x",
+            "http://localhost.evil.com",
+            "http://127.0.0.1.evil.com:3710",
+            "https://localhost",
+        ] { assert!(!origin_ok(o), "{o}"); }
+    }
 }
